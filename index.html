@@ -15132,6 +15132,28 @@ const DATA = JSON.parse(document.getElementById('tracker-data-json').textContent
 const DAYS = DATA.days;
 const TOPICS = DATA.topics_registry;
 
+// dias extras sao gerados sob demanda se um item precisar ser adiado alem do fim do
+// calendario original — nunca "perdemos" um item, so criamos mais um dia pra ele.
+let EXTENDED_DAYS = DAYS.slice();
+const WEEK_DAY_NAMES = ['Sábado', 'Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta'];
+const CAL_START = new Date(2026, 7, 8); // 08/08/2026, dia 0 do calendario (mesma base do gerador)
+
+function ensureDay(idx) {
+  while (EXTENDED_DAYS.length <= idx) {
+    const i = EXTENDED_DAYS.length;
+    const d = new Date(CAL_START.getTime());
+    d.setDate(d.getDate() + i);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const ref = EXTENDED_DAYS[i - 1] || { leitura_min: 0, questoes_min: 0 };
+    EXTENDED_DAYS.push({
+      semana: null, semana_abs: null, dia_nome: WEEK_DAY_NAMES[i % 7], data: dd + '/' + mm,
+      is_extra_week: true, leitura_min: ref.leitura_min, questoes_min: ref.questoes_min,
+      study_items: [], review_native: [], lei_seca_native: [],
+    });
+  }
+}
+
 // ---------- estado persistido ----------
 // doneIds: array de ids marcados como "estudado" (travados no dia em que caem)
 // skipCount: {itemId: numero de vezes que "nao estudei" foi clicado} — cada clique
@@ -15296,43 +15318,60 @@ function undoLast() {
 // ============================================================
 // SIMULACAO DE REAGENDAMENTO (esteira / fila por dia, com "credito" de adiamento)
 // capacidade: 2 vagas de estudo por dia, 1 vaga de revisao por dia.
-// - itens marcados "estudei" ficam travados no dia em que caem (sempre exibidos).
-// - cada clique em "nao estudei" soma 1 ao contador de adiamentos daquele item;
-//   a simulacao "cobra" esse credito UMA vez por dia ate zerar, so entao o item
-//   volta a disputar vaga normalmente (podendo empurrar outro item pra frente).
+// - itens marcados "estudei/revisei/li" ficam travados no dia em que efetivamente
+//   pousam apos o adiamento (sempre exibidos ali, sem disputar cota) — MAS eles ainda
+//   respeitam os creditos de adiamento pendentes antes disso, entao um item que foi
+//   empurrado pra frente com "nao estudei" e so DEPOIS marcado como feito continua no
+//   dia pra onde foi empurrado, nao volta pro dia original.
+// - cada clique em "nao estudei/nao revisei/nao li" soma 1 ao contador de adiamentos
+//   daquele item; a simulacao "cobra" esse credito UMA vez por dia ate zerar, so entao
+//   o item volta a disputar vaga normalmente (podendo empurrar outro item pra frente).
+// - se a fila nunca couber nos dias originais do calendario, dias extras sao criados
+//   sob demanda (ensureDay) — nenhum item se perde no fim do calendario.
 // ============================================================
-function simulateTrack(days, itemsSource, doneSet, skipCountMap, capacity) {
+function simulateTrack(itemsSource, doneSet, skipCountMap, capacity) {
   const getItems = typeof itemsSource === 'function' ? itemsSource : (day => day[itemsSource]);
   let carry = [];
   const runtimeDeferred = {};
   const dayResults = [];
-  for (const day of days) {
+  const SAFETY_EXTRA_DAYS = 500; // evita loop infinito em algum cenario patologico
+  let i = 0;
+  while (i < DAYS.length || carry.length > 0) {
+    if (i >= DAYS.length + SAFETY_EXTRA_DAYS) break;
+    ensureDay(i);
+    const day = EXTENDED_DAYS[i];
     const pool = carry.concat(getItems(day));
-    const doneItems = pool.filter(it => doneSet.has(it.id));
-    const others = pool.filter(it => !doneSet.has(it.id));
-    const shown = doneItems.slice();
-    const remainingCap = Math.max(0, capacity - doneItems.length);
 
-    const eligible = [];
+    // 1) aplica o credito de adiamento pendente a TODOS os itens (feitos ou nao) —
+    //    so depois disso decidimos quem esta "feito" no dia em que realmente pousou.
+    const landedToday = [];
     const deferredToday = [];
-    for (const it of others) {
+    for (const it of pool) {
       const sc = skipCountMap[it.id] || 0;
       const rd = runtimeDeferred[it.id] || 0;
       if (rd < sc) {
         runtimeDeferred[it.id] = rd + 1;
         deferredToday.push(it);
       } else {
-        eligible.push(it);
+        landedToday.push(it);
       }
     }
-    const accepted = eligible.slice(0, remainingCap);
-    const overflow = eligible.slice(remainingCap);
-    shown.push(...accepted);
+
+    // 2) dos itens que pousaram hoje, os ja marcados como feitos sempre aparecem
+    //    (nao contam pra cota); os demais disputam a cota restante do dia.
+    const doneItems = landedToday.filter(it => doneSet.has(it.id));
+    const others = landedToday.filter(it => !doneSet.has(it.id));
+    const remainingCap = Math.max(0, capacity - doneItems.length);
+    const accepted = others.slice(0, remainingCap);
+    const overflow = others.slice(remainingCap);
+
+    const shown = doneItems.concat(accepted);
     shown.sort((a, b) => pool.indexOf(a) - pool.indexOf(b));
     dayResults.push(shown);
     carry = deferredToday.concat(overflow);
+    i++;
   }
-  return dayResults; // array paralelo a `days`, cada elemento = lista de itens exibidos naquele dia
+  return dayResults; // array paralelo aos dias (originais + extras criados), cada elemento = itens exibidos naquele dia
 }
 
 // Estudo e lei seca disputam a MESMA cota de 2 vagas/dia (lei seca nao soma, ela ocupa
@@ -15342,9 +15381,9 @@ function getSimulated() {
   const mergedDone = new Set([...doneIds, ...leiDoneIds]);
   const mergedSkip = Object.assign({}, skipCount, leiSkipCount);
   const combinedByDay = simulateTrack(
-    DAYS, day => day.study_items.concat(day.lei_seca_native), mergedDone, mergedSkip, 2
+    day => day.study_items.concat(day.lei_seca_native), mergedDone, mergedSkip, 2
   );
-  const revByDay = simulateTrack(DAYS, 'review_native', revDoneIds, revSkipCount, 1);
+  const revByDay = simulateTrack('review_native', revDoneIds, revSkipCount, 1);
   const studyByDay = combinedByDay.map(list => list.filter(it => it.id[0] !== 'l'));
   const leiByDay = combinedByDay.map(list => list.filter(it => it.id[0] === 'l'));
   return { studyByDay, revByDay, leiByDay };
@@ -15480,11 +15519,16 @@ function renderCronogramaTab() {
   const { studyByDay, revByDay, leiByDay } = getSimulated();
   const today = todayStr();
   let html = '';
+  // as 3 trilhas podem ter se estendido por quantidades diferentes de dias extras —
+  // usamos o maior comprimento e EXTENDED_DAYS (ja populado pela simulacao) pra cobrir tudo.
+  const totalDays = Math.max(studyByDay.length, revByDay.length, leiByDay.length);
 
-  DAYS.forEach((day, idx) => {
-    const studyItems = studyByDay[idx];
-    const revItems = revByDay[idx];
-    const leiItems = leiByDay[idx];
+  for (let idx = 0; idx < totalDays; idx++) {
+    ensureDay(idx);
+    const day = EXTENDED_DAYS[idx];
+    const studyItems = studyByDay[idx] || [];
+    const revItems = revByDay[idx] || [];
+    const leiItems = leiByDay[idx] || [];
     const isToday = day.data === today;
     let body = '';
     if (studyItems.length === 0 && revItems.length === 0 && leiItems.length === 0) {
@@ -15498,7 +15542,7 @@ function renderCronogramaTab() {
       '<div class="day-head"><span>' + day.dia_nome + ' — ' + day.data + (isToday ? ' (hoje)' : '') + '</span>' +
       '<span style="font-weight:400;">Leitura ' + fmtH(day.leitura_min) + ' · Questões ' + fmtH(day.questoes_min) + '</span></div>' +
       body + '</div>';
-  });
+  }
   document.getElementById('view-cronograma').innerHTML = html;
 }
 
