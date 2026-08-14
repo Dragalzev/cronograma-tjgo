@@ -18219,7 +18219,8 @@ function resetAll() {
   doneIds = new Set(); skipCount = {}; revDoneIds = new Set(); revSkipCount = {};
   leiDoneIds = new Set(); leiSkipCount = {}; topicStats = {};
   undoStack = [];
-  scheduleCloudSync();
+  clearTimeout(syncTimer);
+  pushToCloud(); // envio imediato (nao debounced) — zerar precisa confirmar na nuvem na hora
   renderAll();
 }
 
