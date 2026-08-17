@@ -22977,11 +22977,9 @@ function undoLast() {
 // ============================================================
 // SIMULACAO DE REAGENDAMENTO (esteira / fila por dia, com "credito" de adiamento)
 // capacidade: 2 vagas de estudo por dia, 1 vaga de revisao por dia.
-// - itens marcados "estudei/revisei/li" ficam travados no dia em que efetivamente
-//   pousam apos o adiamento (sempre exibidos ali, sem disputar cota) — MAS eles ainda
-//   respeitam os creditos de adiamento pendentes antes disso, entao um item que foi
-//   empurrado pra frente com "nao estudei" e so DEPOIS marcado como feito continua no
-//   dia pra onde foi empurrado, nao volta pro dia original.
+// - a posicao de cada item no calendario e 100% determinada pelo contador de "nao
+//   estudei/nao revisei/nao li" (skipCount) — marcar "estudei/revisei/li" NUNCA muda
+//   a posicao de nada, so decora o item como feito no dia em que ele ja estava.
 // - cada clique em "nao estudei/nao revisei/nao li" soma 1 ao contador de adiamentos
 //   daquele item; a simulacao "cobra" esse credito UMA vez por dia ate zerar, so entao
 //   o item volta a disputar vaga normalmente (podendo empurrar outro item pra frente).
@@ -23001,31 +22999,31 @@ function simulateTrack(itemsSource, doneSet, skipCountMap, capacity) {
     const day = EXTENDED_DAYS[i];
     const pool = carry.concat(getItems(day));
 
-    // 1) aplica o credito de adiamento pendente a TODOS os itens (feitos ou nao) —
-    //    so depois disso decidimos quem esta "feito" no dia em que realmente pousou.
-    const landedToday = [];
+    // Percorre a fila do dia gastando as vagas EM ORDEM. O ponto critico (bug de
+    // "troca" relatado desde as primeiras versoes, corrigido em 17/08): quando um
+    // item e adiado com "nao estudei", ele CONSOME a vaga do dia mesmo assim, em vez
+    // de liberar o lugar. Antes o adiamento abria uma vaga, e o item do dia SEGUINTE
+    // subia para ocupa-la — ou seja, marcar "nao estudei" numa terca fazia o conteudo
+    // de quarta ANDAR PARA TRAS ate a terca, parecendo uma troca entre os dois dias.
+    // Agora o adiamento so empurra para frente: o dia fica com uma vaga a menos e
+    // ninguem nunca retrocede no calendario.
+    const shown = [];
     const deferredToday = [];
+    const overflow = [];
+    let slotsUsed = 0;
     for (const it of pool) {
+      if (slotsUsed >= capacity) { overflow.push(it); continue; }
       const sc = skipCountMap[it.id] || 0;
       const rd = runtimeDeferred[it.id] || 0;
       if (rd < sc) {
         runtimeDeferred[it.id] = rd + 1;
         deferredToday.push(it);
       } else {
-        landedToday.push(it);
+        shown.push(it);
       }
+      slotsUsed++; // vaga gasta nos dois casos (exibido OU adiado)
     }
 
-    // 2) dos itens que pousaram hoje, os ja marcados como feitos sempre aparecem
-    //    (nao contam pra cota); os demais disputam a cota restante do dia.
-    const doneItems = landedToday.filter(it => doneSet.has(it.id));
-    const others = landedToday.filter(it => !doneSet.has(it.id));
-    const remainingCap = Math.max(0, capacity - doneItems.length);
-    const accepted = others.slice(0, remainingCap);
-    const overflow = others.slice(remainingCap);
-
-    const shown = doneItems.concat(accepted);
-    shown.sort((a, b) => pool.indexOf(a) - pool.indexOf(b));
     dayResults.push(shown);
     carry = deferredToday.concat(overflow);
     i++;
