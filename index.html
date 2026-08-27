@@ -99,6 +99,13 @@
   }
   .actions button.done-btn.active { background: #2e7d32; color: white; border-color: #2e7d32; }
   .actions button.skip-btn.active { background: var(--maroon); color: white; border-color: var(--maroon); }
+  .actions button.prior-btn { border-radius: 50%; width: 26px; height: 26px; padding: 0;
+    font-size: 13px; line-height: 1; color: #999; }
+  .actions button.prior-btn:hover { border-color: #6b8e5a; color: #6b8e5a; }
+  .prior-row { display:flex; justify-content:space-between; align-items:center; gap:10px;
+    padding:8px 12px; border-bottom:1px solid var(--line); }
+  .prior-row .p-desc { font-size:12px; }
+  .prior-row .p-mat { font-weight:600; font-size:11px; color:var(--maroon); }
 
   .stats-form { display: flex; gap: 8px; margin-top: 7px; flex-wrap: wrap; align-items: flex-end; }
   .stats-form label { font-size: 10.5px; color: #666; display: flex; flex-direction: column; gap: 2px; }
@@ -168,12 +175,14 @@
   <div class="sub" id="header-sub"></div>
   <nav class="tabs">
     <button id="tab-btn-cronograma" class="active" onclick="showTab('cronograma')">Cronograma</button>
+    <button id="tab-btn-prior" onclick="showTab('prior')">Conteúdo já estudado no outro material</button>
   </nav>
   <button class="undo-btn" onclick="undoLast()" title="Desfaz o último clique em Estudei/Não estudei/Revisei/Não revisei/Li/Não li">&#8630; Desfazer última ação</button>
 </header>
 
 <main>
   <div id="view-cronograma" class="view active"></div>
+  <div id="view-prior" class="view"></div>
   <div class="footer-note">
     Progresso sincronizado na nuvem (Firebase) — funciona em qualquer aparelho.
     <span id="sync-status" style="margin-left:6px;"></span>
@@ -216,6 +225,9 @@ function ensureDay(idx) {
 //   estava naquele dia). NAO e um estado persistente tipo "sempre pulado": e um
 //   contador de quantas vezes ele ja deve ter sido adiado ate finalmente aparecer.
 const LS_KEY_DONE = 'tjgo_done_ids_v2';
+// itens que o usuario ja estudou pelo MATERIAL ANTIGO: saem do cronograma e o proximo
+// conteudo da MESMA materia e adiantado para a vaga liberada.
+const LS_KEY_PRIOR = 'tjgo_prior_ids_v1';
 const LS_KEY_SKIP = 'tjgo_skip_count_v2';
 const LS_KEY_REVDONE = 'tjgo_rev_done_ids_v2';
 const LS_KEY_REVSKIP = 'tjgo_rev_skip_count_v2';
@@ -251,7 +263,7 @@ function setSyncStatus(text) {
 
 function collectState() {
   return {
-    doneIds: Array.from(doneIds), skipCount, revDoneIds: Array.from(revDoneIds), revSkipCount,
+    doneIds: Array.from(doneIds), priorIds: Array.from(priorIds), skipCount, revDoneIds: Array.from(revDoneIds), revSkipCount,
     leiDoneIds: Array.from(leiDoneIds), leiSkipCount, topicStats, aulaStats, updatedAt: Date.now(),
   };
 }
@@ -259,6 +271,7 @@ function collectState() {
 function applyState(state) {
   if (!state) return;
   doneIds = new Set(state.doneIds || []);
+  priorIds = new Set(state.priorIds || []);
   skipCount = state.skipCount || {};
   revDoneIds = new Set(state.revDoneIds || []);
   revSkipCount = state.revSkipCount || {};
@@ -267,6 +280,7 @@ function applyState(state) {
   topicStats = state.topicStats || {};
   aulaStats = state.aulaStats || {};
   saveLS(LS_KEY_DONE, Array.from(doneIds));
+  saveLS(LS_KEY_PRIOR, Array.from(priorIds));
   saveLS(LS_KEY_SKIP, skipCount);
   saveLS(LS_KEY_REVDONE, Array.from(revDoneIds));
   saveLS(LS_KEY_REVSKIP, revSkipCount);
@@ -302,6 +316,7 @@ function pullFromCloud() {
 }
 
 let doneIds = new Set(loadLS(LS_KEY_DONE, []));
+let priorIds = new Set(loadLS(LS_KEY_PRIOR, []));
 let skipCount = loadLS(LS_KEY_SKIP, {});
 let revDoneIds = new Set(loadLS(LS_KEY_REVDONE, []));
 let revSkipCount = loadLS(LS_KEY_REVSKIP, {});
@@ -310,6 +325,16 @@ let leiSkipCount = loadLS(LS_KEY_LEISKIP, {});
 let topicStats = loadLS(LS_KEY_TOPICSTATS, {});
 let aulaStats = loadLS(LS_KEY_AULASTATS, {});
 
+function persistPrior() {
+  saveLS(LS_KEY_PRIOR, Array.from(priorIds));
+  scheduleCloudSync();
+}
+function togglePrior(id) {
+  if (priorIds.has(id)) priorIds.delete(id); else priorIds.add(id);
+  pushUndo({ kind: 'prior', id });
+  persistPrior();
+  renderAll();
+}
 function persistStudy() {
   saveLS(LS_KEY_DONE, Array.from(doneIds));
   saveLS(LS_KEY_SKIP, skipCount);
@@ -329,6 +354,7 @@ function persistLei() {
 function resetAll() {
   if (!confirm('Isso apaga todo o progresso marcado e as estatísticas salvas neste navegador E na nuvem, em todos os aparelhos. Confirmar?')) return;
   localStorage.removeItem(LS_KEY_DONE);
+  localStorage.removeItem(LS_KEY_PRIOR);
   localStorage.removeItem(LS_KEY_SKIP);
   localStorage.removeItem(LS_KEY_REVDONE);
   localStorage.removeItem(LS_KEY_REVSKIP);
@@ -336,7 +362,7 @@ function resetAll() {
   localStorage.removeItem(LS_KEY_LEISKIP);
   localStorage.removeItem(LS_KEY_TOPICSTATS);
   localStorage.removeItem(LS_KEY_AULASTATS);
-  doneIds = new Set(); skipCount = {}; revDoneIds = new Set(); revSkipCount = {};
+  doneIds = new Set(); priorIds = new Set(); skipCount = {}; revDoneIds = new Set(); revSkipCount = {};
   leiDoneIds = new Set(); leiSkipCount = {}; topicStats = {}; aulaStats = {};
   undoStack = [];
   clearTimeout(syncTimer);
@@ -356,6 +382,10 @@ function pushUndo(entry) {
 function undoLast() {
   const last = undoStack.pop();
   if (!last) { alert('Não há nenhuma ação para desfazer.'); return; }
+  if (last.kind === 'prior') {
+    if (priorIds.has(last.id)) priorIds.delete(last.id); else priorIds.add(last.id);
+    persistPrior(); renderAll(); return;
+  }
   const set = last.track === true ? revDoneIds : last.track === 'lei' ? leiDoneIds : doneIds;
   const map = last.track === true ? revSkipCount : last.track === 'lei' ? leiSkipCount : skipCount;
   if (last.kind === 'done') {
@@ -379,8 +409,30 @@ function undoLast() {
 // - se a fila nunca couber nos dias originais do calendario, dias extras sao criados
 //   sob demanda (ensureDay) — nenhum item se perde no fim do calendario.
 // ============================================================
+// Remove do cronograma os itens marcados como "ja estudei pelo outro material" e ADIANTA
+// os conteudos seguintes da MESMA materia para as vagas liberadas (cada materia tem sua
+// propria sequencia de vagas no calendario, entao o adiantamento nao mistura materias).
+function effectiveStudyByDay() {
+  const bySubj = {};
+  DAYS.forEach((day, i) => {
+    day.study_items.forEach(it => {
+      const mk = it.materia_key || '_';
+      if (!bySubj[mk]) bySubj[mk] = { slots: [], items: [] };
+      bySubj[mk].slots.push(i);
+      bySubj[mk].items.push(it);
+    });
+  });
+  const out = DAYS.map(() => []);
+  for (const mk in bySubj) {
+    const s = bySubj[mk];
+    s.items.filter(it => !priorIds.has(it.id))
+           .forEach((it, k) => { if (k < s.slots.length) out[s.slots[k]].push(it); });
+  }
+  return out;
+}
+
 function simulateTrack(itemsSource, doneSet, skipCountMap, capacity) {
-  const getItems = typeof itemsSource === 'function' ? itemsSource : (day => day[itemsSource]);
+  const getItems = typeof itemsSource === 'function' ? itemsSource : ((day, i) => day[itemsSource]);
   let carry = [];
   const runtimeDeferred = {};
   const dayResults = [];
@@ -390,7 +442,7 @@ function simulateTrack(itemsSource, doneSet, skipCountMap, capacity) {
     if (i >= DAYS.length + SAFETY_EXTRA_DAYS) break;
     ensureDay(i);
     const day = EXTENDED_DAYS[i];
-    const pool = carry.concat(getItems(day));
+    const pool = carry.concat(getItems(day, i) || []);
 
     // Percorre a fila do dia gastando as vagas EM ORDEM. O ponto critico (bug de
     // "troca" relatado desde as primeiras versoes, corrigido em 17/08): quando um
@@ -430,8 +482,9 @@ function simulateTrack(itemsSource, doneSet, skipCountMap, capacity) {
 function getSimulated() {
   const mergedDone = new Set([...doneIds, ...leiDoneIds]);
   const mergedSkip = Object.assign({}, skipCount, leiSkipCount);
+  const EFF = effectiveStudyByDay();
   const combinedByDay = simulateTrack(
-    day => day.study_items.concat(day.lei_seca_native), mergedDone, mergedSkip, 2
+    (day, i) => (EFF[i] || []).concat(day.lei_seca_native || []), mergedDone, mergedSkip, 2
   );
   const revByDay = simulateTrack('review_native', revDoneIds, revSkipCount, 1);
   const studyByDay = combinedByDay.map(list => list.filter(it => it.id[0] !== 'l'));
@@ -514,6 +567,7 @@ function studyItemHtml(day, item) {
       '<div class="actions">' +
         '<button class="done-btn' + (isDone ? ' active' : '') + '" onclick="toggleDone(\'' + item.id + '\',false)">&#10003; Estudei</button>' +
         '<button class="skip-btn" onclick="bumpSkip(\'' + item.id + '\',false)" title="Adia esta matéria para o próximo dia">&#10007; Não estudei</button>' +
+        '<button class="prior-btn" onclick="togglePrior(\'' + item.id + '\')" title="Já estudei este conteúdo pelo material antigo — tira do cronograma e adianta o próximo conteúdo desta matéria">&#9711;</button>' +
       '</div>' +
     '</div>' +
   '</div>';
@@ -892,8 +946,34 @@ function revItemCard(r, isOk) {
 // ============================================================
 // TABS + boot
 // ============================================================
+function renderPriorTab() {
+  const byId = {};
+  DAYS.forEach(d => d.study_items.forEach(it => { byId[it.id] = it; }));
+  const list = Array.from(priorIds).map(id => byId[id]).filter(Boolean);
+  let html = '';
+  if (!list.length) {
+    html = '<div class="day-card"><div class="empty-day">Nada marcado ainda. Use a bolinha (&#9711;) ' +
+           'ao lado de um conteúdo no cronograma para marcar que você já o estudou pelo material antigo.</div></div>';
+  } else {
+    const byMat = {};
+    list.forEach(it => { (byMat[it.materia] = byMat[it.materia] || []).push(it); });
+    for (const mat in byMat) {
+      html += '<div class="day-card"><div class="day-head"><span>' + mat + '</span>' +
+              '<span style="font-weight:400;">' + byMat[mat].length + ' conteúdo(s)</span></div>';
+      byMat[mat].forEach(it => {
+        html += '<div class="prior-row"><div><div class="p-mat">' + it.materia + '</div>' +
+                '<div class="p-desc">' + it.desc + '</div></div>' +
+                '<button class="skip-btn" onclick="togglePrior(\'' + it.id + '\')" ' +
+                'title="Devolve este conteúdo para o cronograma">&#8630; Devolver ao cronograma</button></div>';
+      });
+      html += '</div>';
+    }
+  }
+  document.getElementById('view-prior').innerHTML = html;
+}
+
 function showTab(name) {
-  ['cronograma'].forEach(n => {
+  ['cronograma', 'prior'].forEach(n => {
     document.getElementById('view-' + n).classList.toggle('active', n === name);
     document.getElementById('tab-btn-' + n).classList.toggle('active', n === name);
   });
@@ -901,6 +981,7 @@ function showTab(name) {
 
 function renderAll() {
   renderCronogramaTab();
+  renderPriorTab();
 }
 
 document.getElementById('header-sub').textContent = DATA.days.length + ' dias de estudo';
