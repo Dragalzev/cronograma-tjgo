@@ -173,6 +173,9 @@
     font-size:9px; line-height:15px; color:#bbb; border:1px solid var(--line);
     background:#fff; cursor:pointer; margin-top:1px; }
   button.prior-btn:hover { border-color:#6b8e5a; color:#6b8e5a; background:#f2f7ef; }
+  .upto-box { color:#aaa; font-size:10px; white-space:nowrap; }
+  .upto-box input { width:38px; padding:1px 3px; font-size:10px; border:1px solid var(--line);
+    border-radius:3px; text-align:center; font-family:inherit; }
   .adv-box { display:flex; align-items:center; gap:4px; font-size:10px; color:#888; }
   .adv-box input { width:42px; padding:2px 4px; font-size:11px; border:1px solid var(--line);
     border-radius:4px; text-align:center; font-family:inherit; }
@@ -234,9 +237,11 @@ let doneIds     = new Set(loadLS(LS.done, []));
 let skipCount   = loadLS(LS.skip, {});
 let revDoneIds  = new Set(loadLS(LS.rdone, []));
 let revSkipCount= loadLS(LS.rskip, {});
-// {aulaId: dayIdx} — a aula deixa de ser estudada A PARTIR daquele dia (o que ja foi
-// lido em dias anteriores continua valendo, entao nada muda retroativamente).
-let priorFrom   = loadLS(LS.prior, {});
+// {aulaId: {upTo:N, from:dayIdx}} — "ja estudei esta aula ate a pagina N pelo material
+// antigo". As paginas 1..N sao puladas A PARTIR do dia `from` (dias anteriores nao mudam),
+// e o restante da aula (N+1 em diante) CONTINUA no cronograma. Se N >= total da aula,
+// ela sai inteira. Assim da pra mesclar os dois materiais aula a aula.
+let priorPages  = loadLS(LS.prior, {});
 let extraPages  = loadLS(LS.extra, {});            // "<dayIdx>|<materia_key>" -> paginas adiantadas
 
 const FIREBASE_DB_URL = 'https://cronograma-tjgo-default-rtdb.firebaseio.com';
@@ -244,17 +249,17 @@ const SYNC_URL = FIREBASE_DB_URL + '/progress/tjgo_gabriel_v3.json';
 let syncTimer=null, syncing=false;
 function setSyncStatus(t){ const e=document.getElementById('sync-status'); if(e) e.textContent=t; }
 function collectState(){ return {doneIds:Array.from(doneIds), skipCount,
-  revDoneIds:Array.from(revDoneIds), revSkipCount, priorFrom,
+  revDoneIds:Array.from(revDoneIds), revSkipCount, priorPages,
   extraPages, updatedAt:Date.now()}; }
 function applyState(s){ if(!s) return;
   doneIds=new Set(s.doneIds||[]); skipCount=s.skipCount||{};
   revDoneIds=new Set(s.revDoneIds||[]); revSkipCount=s.revSkipCount||{};
-  priorFrom=s.priorFrom||{}; extraPages=s.extraPages||{};
+  priorPages=s.priorPages||{}; extraPages=s.extraPages||{};
   persistAll(false); }
 function persistAll(sync){
   saveLS(LS.done,Array.from(doneIds)); saveLS(LS.skip,skipCount);
   saveLS(LS.rdone,Array.from(revDoneIds)); saveLS(LS.rskip,revSkipCount);
-  saveLS(LS.prior,priorFrom); saveLS(LS.extra,extraPages);
+  saveLS(LS.prior,priorPages); saveLS(LS.extra,extraPages);
   if(sync!==false) scheduleCloudSync(); }
 function scheduleCloudSync(){ setSyncStatus('salvando…'); clearTimeout(syncTimer);
   syncTimer=setTimeout(pushToCloud,700); }
@@ -272,7 +277,7 @@ function resetAll(){
   if(!confirm('Isso apaga todo o progresso marcado, neste navegador E na nuvem. Confirmar?')) return;
   for(const k in LS) localStorage.removeItem(LS[k]);
   doneIds=new Set(); skipCount={}; revDoneIds=new Set(); revSkipCount={};
-  priorFrom={}; extraPages={}; undoStack=[];
+  priorPages={}; extraPages={}; undoStack=[];
   clearTimeout(syncTimer); pushToCloud(); renderAll();
 }
 
@@ -281,7 +286,7 @@ function pushUndo(e){ undoStack.push(e); if(undoStack.length>60) undoStack.shift
 function undoLast(){
   const l=undoStack.pop();
   if(!l){ alert('Não há nenhuma ação para desfazer.'); return; }
-  if(l.kind==='prior'){ if(l.prev===undefined) delete priorFrom[l.id]; else priorFrom[l.id]=l.prev; }
+  if(l.kind==='prior'){ if(l.prev===undefined) delete priorPages[l.id]; else priorPages[l.id]=l.prev; }
   else if(l.kind==='extra'){ if(l.prev) extraPages[l.key]=l.prev; else delete extraPages[l.key]; }
   else if(l.kind==='done'){ const s=l.track?revDoneIds:doneIds;
     if(s.has(l.id)) s.delete(l.id); else s.add(l.id); }
@@ -315,7 +320,11 @@ function allocate(){
       const chunks=[];
       while(budget>0.4 && pos<aulas.length){
         const a=aulas[pos];
-        if(priorFrom[a.id]!==undefined && di>=priorFrom[a.id]){ pos++; off=0; continue; }
+        const pr=priorPages[a.id];
+        if(pr && di>=pr.from && off < pr.upTo){
+          off = Math.min(pr.upTo, a.pages);          // pula o que ja foi visto no outro material
+          if(off >= a.pages-0.4){ pos++; off=0; continue; }
+        }
         const avail=a.pages-off;
         const take=Math.min(avail,budget);
         if(take<=0.4) break;
@@ -389,9 +398,17 @@ function bumpSkip(id, track){
   m[id]=(m[id]||0)+1;
   pushUndo({kind:'skip', track:!!track, id}); persistAll(); renderAll();
 }
-function togglePrior(aulaId, dayIdx){
-  const prev=priorFrom[aulaId];
-  if(prev!==undefined) delete priorFrom[aulaId]; else priorFrom[aulaId]=dayIdx;
+function togglePrior(aulaId, dayIdx, upTo){
+  const prev=priorPages[aulaId];
+  if(prev!==undefined) delete priorPages[aulaId];
+  else priorPages[aulaId]={upTo:Number(upTo)||0, from:dayIdx};
+  pushUndo({kind:'prior', id:aulaId, prev}); persistAll(); renderAll();
+}
+function setPriorUpTo(aulaId, dayIdx, val){
+  const prev=priorPages[aulaId];
+  const n=Math.max(0, Math.round(Number(val)||0));
+  if(n>0) priorPages[aulaId]={upTo:n, from:(prev?prev.from:dayIdx)};
+  else delete priorPages[aulaId];
   pushUndo({kind:'prior', id:aulaId, prev}); persistAll(); renderAll();
 }
 function setExtra(dayIdx, mk, val){
@@ -415,11 +432,17 @@ function studyItemHtml(item){
   const min = item.minutos ? ' <span style="font-weight:400;color:#888;font-size:10px;">('+fmtH(item.minutos)+')</span>' : '';
   let chunksHtml='';
   item.chunks.forEach(c=>{
+    const pr=priorPages[c.aulaId];
     chunksHtml += '<div class="chunk-line">' +
-      '<button class="prior-btn" onclick="togglePrior(\'' + c.aulaId + '\',' + item.dayIdx + ')" ' +
-      'title="Já estudei esta aula pelo material antigo — tira do cronograma e redistribui as páginas">&#9711;</button>' +
+      '<button class="prior-btn" onclick="togglePrior(\'' + c.aulaId + '\',' + item.dayIdx + ',' + c.end + ')" ' +
+      'title="Já estudei este trecho pelo material antigo (até a p.' + c.end + ') — o resto da aula continua no cronograma">&#9711;</button>' +
       '<span class="ctext">' + esc(c.nome) + ' (' + fmtP(c.start,c.end) + ')' +
-      (c.concl ? ' <span style="color:#6b8e5a;">— concl.</span>' : '') + '</span></div>';
+      (c.concl ? ' <span style="color:#6b8e5a;">— concl.</span>' : '') +
+      '<span class="upto-box" title="Já estudei esta aula, no material antigo, até a página...">' +
+        ' · outro material até p.<input type="number" min="0" step="1" placeholder="0" value="' +
+        (pr ? pr.upTo : '') + '" onchange="setPriorUpTo(\'' + c.aulaId + '\',' + item.dayIdx + ',this.value)">' +
+      '</span>' +
+      '</span></div>';
   });
   const key=item.dayIdx+'|'+item.materia_key;
   const adv=extraPages[key]||'';
@@ -477,7 +500,7 @@ function renderCronogramaTab(){
 function renderPriorTab(){
   const byId={};
   for(const mk in SUBJ) SUBJ[mk].aulas.forEach(a=>{ byId[a.id]={a, mk}; });
-  const list=Object.keys(priorFrom).map(id=>byId[id]).filter(Boolean);
+  const list=Object.keys(priorPages).map(id=>byId[id]).filter(Boolean);
   let html='';
   if(!list.length){
     html='<div class="day-card"><div class="empty-day">Nada marcado ainda. Use a bolinha (&#9711;) '+
@@ -491,8 +514,11 @@ function renderPriorTab(){
             byMat[mat].reduce((t,x)=>t+x.a.pages,0)+' páginas economizadas</span></div>';
       byMat[mat].forEach(x=>{
         html+='<div class="prior-row"><div><div class="p-mat">'+mat+'</div>'+
-              '<div class="p-desc">'+esc(x.a.nome)+' ('+x.a.pages+' p.)</div></div>'+
-              '<button class="skip-btn" onclick="togglePrior(\''+x.a.id+'\',0)" '+
+              '<div class="p-desc">'+esc(x.a.nome)+' — já estudado no outro material até a <b>p.'+
+              priorPages[x.a.id].upTo+'</b> (de '+x.a.pages+')'+
+              (priorPages[x.a.id].upTo>=x.a.pages ? ' · aula inteira' :
+               ' · restam '+(x.a.pages-priorPages[x.a.id].upTo)+' p. no cronograma')+'</div></div>'+
+              '<button class="skip-btn" onclick="togglePrior(\''+x.a.id+'\',0,0)" '+
               'title="Devolve esta aula para o cronograma">&#8630; Devolver ao cronograma</button></div>';
       });
       html+='</div>';
@@ -512,7 +538,8 @@ function renderAll(){
   renderCronogramaTab();
   renderPriorTab();
   let tot=0, rest=0;
-  for(const mk in SUBJ){ SUBJ[mk].aulas.forEach(a=>{ tot+=a.pages; if(priorFrom[a.id]===undefined) rest+=a.pages; }); }
+  for(const mk in SUBJ){ SUBJ[mk].aulas.forEach(a=>{ tot+=a.pages; const pr=priorPages[a.id];
+    rest += pr ? Math.max(0, a.pages-pr.upTo) : a.pages; }); }
   document.getElementById('header-sub').textContent =
     DAYS.length+' dias · '+rest.toLocaleString('pt-BR')+' páginas restantes'+
     (rest<tot ? ' (de '+tot.toLocaleString('pt-BR')+')' : '');
